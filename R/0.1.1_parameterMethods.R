@@ -1,57 +1,27 @@
 # default return values if null-------------------------------------------------
 '%set%' <- function(x,y) {
 
-  par <- ifelse(is.null(x),y,x)
-
-  return(par)
-
-}
-
-# subset data according to model class------------------------------------------
-dataModelClass <- function(dt,dtc,filter,group_by) {
-
-  dt <- merge(
-    x=dt,
-    y=dtc[eval(filter),.SD,.SDcols=group_by],
-    by=group_by,
-    all.y=TRUE
-  )
-
-  if (any(is.na(dt$model))) {
-
-    stop('not all *',class,' models merged to data')
-
-  }
-
-  return(dt)
+  ifelse(is.null(x),y,x)
 
 }
 
 # subset data groups for granularity--------------------------------------------
-dataGroupByGrid <- function(dt,group_by,incl_data=FALSE) {
+dataParameterGrid <- function(dt,subset=NULL,
+                              group_by=getAttrs(dt,'group_by'),
+                              decreasing=getOption('decreasing',default=FALSE)) {
 
-  if (incl_data) {
+  # sort group by columns for consistent hashing--------------------------------
+  group_by <- sort(group_by,decreasing=decreasing)
 
-    dt[,.(data=.(.SD),dummy=0L),by=c(group_by)]
+  # create nested tables by group-----------------------------------------------
+  dt <- dt[eval(subset),.(data_spec=.(unique(.SD))),.SDcols=group_by,by=group_by]
 
-  } else {
-
-    dt[,.(dummy=0L),by=c(group_by)]
-
-  }
-
-}
-
-# subset nested data for modeling periods---------------------------------------
-sdNested <- function(dt,incl_data=FALSE) {
-
-  if (incl_data) {
-
-    dt[,data := .(
-      .(data[[1]][ds %between% c(train_start,test_end)])
-    ),by=seq_len(nrow(dt))]
-
-  }
+  # create hash for referencing-------------------------------------------------
+  dt <- dt[,.(
+    data_spec,
+    data_hash=as.factor(md5(as.character(data_spec))),
+    dummy=0L
+  )]
 
   return(dt)
 
@@ -69,15 +39,22 @@ shiftDate <- function(start,step,freq,folds) {
 }
 
 # add variable periods to date--------------------------------------------------
-addPeriods <- function(date,freq,x) {
+addPeriods <- function(date,freq,x,incl_bound=TRUE) {
 
   date <- as.Date(date)
 
+  if (!incl_bound) {
+
+    x <- x-1
+
+  }
+
   switch(
     EXPR=freq,
-    month=date+months(x-1),
-    week=date+weeks(x-1),
-    day=date+days(x-1)
+    year=date+years(x),
+    month=date+months(x),
+    week=date+weeks(x),
+    day=date+days(x)
   )
 
 }
@@ -86,7 +63,7 @@ addPeriods <- function(date,freq,x) {
 crossValidationGrid <- function(
   frequency,
   horizon_length,
-  week_start,
+  week_start=getOption('week_start',1L),
   train_start,
   test_start,
   cv_folds,
@@ -133,7 +110,8 @@ crossValidationGrid <- function(
   test_end_folds <- addPeriods(
     date=test_start_folds,
     freq=frequency,
-    x=horizon_length
+    x=horizon_length,
+    incl_bound=FALSE
   )
 
   # construct cross validaiton table--------------------------------------------
@@ -142,7 +120,7 @@ crossValidationGrid <- function(
     test_start=test_start_folds,
     test_end=test_end_folds,
     horizon_length=horizon_length,
-    frequency=frequency,
+    frequency=as.factor(frequency),
     week_start=week_start,
     dummy=0L
   )
@@ -158,7 +136,7 @@ crossValidationGrid <- function(
 }
 
 # sort list elements and discard null elements----------------------------------
-compactList <- function(l,decreasing=FALSE) {
+compactList <- function(l,decreasing=getOption('decreasing',default=FALSE)) {
 
   compact(l[sort(names(l),decreasing=decreasing)])
 
@@ -202,7 +180,7 @@ expandGridList <- function(x,y) {
 }
 
 # recursive cartesian product creation------------------------------------------
-imapGridList <- function(l,decreasing=FALSE) {
+imapGridList <- function(l,decreasing=getOption('decreasing',default=FALSE)) {
 
   # sort root list elements and discard null elements---------------------------
   l <- compactList(l,decreasing)
@@ -240,10 +218,10 @@ imapGridList <- function(l,decreasing=FALSE) {
 }
 
 # apply cartesian grid over list and transpose reduction------------------------
-modelParameterGrid <- function(l,decreasing=FALSE) {
+modelParameterGrid <- function(l,decreasing=getOption('decreasing',default=FALSE)) {
 
   # recursive cartesian product creation----------------------------------------
-  imapGridList(l) %>%
+  m_spec <- imapGridList(l) %>%
     imap(~ {
 
       # rename model specifications column--------------------------------------
@@ -251,58 +229,93 @@ modelParameterGrid <- function(l,decreasing=FALSE) {
 
       # assign model names hash model specifications----------------------------
       .x[,`:=` (
-        m=.y,
-        m_hash=md5(as.character(m_spec))
+        m=as.factor(.y),
+        m_hash=as.factor(md5(as.character(m_spec)))
       )]
 
-    }) %>%
-    rbindlist(fill=TRUE)
+    }) %>% rbindlist(fill=TRUE)
+
+  return(m_spec)
+
+}
+
+# bind parameter specification tables-------------------------------------------
+bindParameterSpecs <- function(l,by) {
+
+  rbindlist(l,use.names=TRUE) %>%
+    unique(by=by) %>%
+    .[,.SD,.SDcols=-c('dummy')]
 
 }
 
 # timeseries forecast parameter grid--------------------------------------------
-forecastParameterGrid <- function(l,dt,dt_dr,cv_grid,group_by,incl_data) {
+forecastParameterGrid <- function(l) {
 
-  gdb <- lapply(l,function(j) {
-
-    # subset data according to model class--------------------------------------
-    dt <- dataModelClass(
-      dt=dt,
-      dtc=dt_dr,
-      filter=j$filter,
-      group_by=group_by
-    )
+  # extract data specifications-------------------------------------------------
+  dt_spec_l <- map(.x=l,.f=~ {
 
     # subset data groups for granularity----------------------------------------
-    d_grid <- dataGroupByGrid(
-      dt=dt,
-      group_by=group_by,
-      incl_data=incl_data
+    dataParameterGrid(
+      dt=pluck(.x,'data'),
+      subset=pluck(.x,'subset')
     )
 
-    # cartesian join data groups and cross validation windows-------------------
-    d_cv_grid <- list(d_grid,cv_grid) %>%
-      reduceGridList()
+  })
 
-    # subset nested data for modeling periods-----------------------------------
-    d_cv_grid <- sdNested(
-      dt=d_cv_grid,
-      incl_data=incl_data
+  # extract cross validation specifications-------------------------------------
+  cv_spec_l <- map(.x=l,.f=~ {
+
+    pluck(.x,'cv_grid')
+
+  })
+
+  # extract model specifications------------------------------------------------
+  m_spec_l <- map(.x=l,.f=~ {
+
+    # apply cartesian grid over list and transpose reduction--------------------
+    modelParameterGrid(
+      l=pluck(.x,'model_specs')
     )
 
-    # recursively apply cartesian grid over list and transpose reduction--------
-    m_grid <- modelParameterGrid(j$model)
+  })
 
-    # cartesian join tables within the same depth-------------------------------
-    gdb_j <- list(d_cv_grid,m_grid) %>%
+  # reduce data, cross validation, and model specifications---------------------
+  f_spec <- mapply(function(d,c,m) {
+
+    grid_j <- list(
+      d[,.SD,.SDcols=-c('data_spec')],
+      c,
+      m[,.SD,.SDcols=-c('m_spec')]
+    ) %>%
       reduceGridList()
 
-    gdb_j[,dummy := NULL]
+    grid_j[,dummy := NULL]
 
-    return(gdb_j)
+  },
+  d=dt_spec_l,
+  m=m_spec_l,
+  c=cv_spec_l,
+  SIMPLIFY=FALSE
+  ) %>% rbindlist(use.names=TRUE)
 
-  }) %>% rbindlist(use.names=TRUE)
+  # bind parameter specification tables-----------------------------------------
+  m_spec <- bindParameterSpecs(l=m_spec_l,by='m_hash')
+  dt_spec <- bindParameterSpecs(l=dt_spec_l,by='data_hash')
 
-  return(gdb)
+  # create forecast parameter database list-------------------------------------
+  pdb <- list(
+    f_spec=f_spec,
+    d_spec=dt_spec,
+    m_spec=m_spec
+  )
+
+  cat(
+    'Number of data groups:',nrow(dt_spec),'\n',
+    'Number of models:',nrow(m_spec),'\n',
+    'Number of simulations to run:',nrow(f_spec),
+    fill=TRUE
+    )
+
+  return(pdb)
 
 }

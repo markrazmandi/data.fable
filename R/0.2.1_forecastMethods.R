@@ -34,7 +34,7 @@ rollingMean <- function(data,m_spec,train_start,test_start,test_end) {
   )]
 
   # compute total forecast error------------------------------------------------
-  p_e <- p_f[,sum(err,na.rm=TRUE)]
+  # p_e <- p_f[,sum(err,na.rm=TRUE)]
 
   # assign model fit and predictions--------------------------------------------
   l <- list(
@@ -90,13 +90,13 @@ prophetForecast <- function(data,m_spec,train_start,test_start,test_end) {
 
     if (m_spec$regressor[[i]]$prior_scale!=0) {
 
-    m <- add_regressor(
-      m=m,
-      name=m_spec$regressor[[i]]$name,
-      prior.scale=m_spec$regressor[[i]]$prior_scale,
-      standardize=m_spec$regressor[[i]]$standardize %set% 'auto',
-      mode=m_spec$regressor[[i]]$mode
-    )
+      m <- add_regressor(
+        m=m,
+        name=m_spec$regressor[[i]]$name,
+        prior.scale=m_spec$regressor[[i]]$prior_scale,
+        standardize=m_spec$regressor[[i]]$standardize %set% 'auto',
+        mode=m_spec$regressor[[i]]$mode
+      )
 
     }
 
@@ -133,19 +133,45 @@ prophetForecast <- function(data,m_spec,train_start,test_start,test_end) {
     horizon=rleid(ds)
   )]
 
-  # add forecast dataset to model parameter list--------------------------------
-  m_f$forecast <- f_d
-
   # compute total forecast error------------------------------------------------
   # p_e <- f_d[,sum(err,na.rm=TRUE)]
+
+  # coerce history parameter to list for speed----------------------------------
+  m_f$history <- as.list(m_f$history)
+
+  # add forecast dataset to model parameter list--------------------------------
+  m_f$forecast <- as.list(f_d)
 
   # assign model fit and predictions--------------------------------------------
   l <- list(
     m_fit=m_f,
-    m_pred=f_d[,.SD,,.SDcols=c('ds','horizon','y','yhat','err')]
+    m_pred=f_d[,.SD,.SDcols=c('ds','horizon','y','yhat','err')]
     # m_err=p_e
   )
 
   return(l)
+
+}
+
+# forecast model switch---------------------------------------------------------
+forecastModels <- function(m,data,m_spec,train_start,test_start,test_end) {
+
+  switch(
+    EXPR=as.character(m),
+    'prophet'=prophetForecast(
+      data=data,
+      m_spec=m_spec,
+      train_start=train_start,
+      test_start=test_start,
+      test_end=test_end
+    ),
+    'ma'=rollingMean(
+      data=data,
+      m_spec=m_spec,
+      train_start=train_start,
+      test_start=test_start,
+      test_end=test_end
+    )
+  )
 
 }

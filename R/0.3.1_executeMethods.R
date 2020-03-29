@@ -1,77 +1,44 @@
-# pairlist to extract data based on source--------------------------------------
-dataInclusion <- function(dt,key,incl_data) {
-
-  if (incl_data) {
-
-    dots <- list(dt=NULL,key=NULL)
-
-  } else {
-
-    dots <- list(dt=dt,key=key)
-
-  }
-
-  return(dots)
-
-}
-
 # extract data------------------------------------------------------------------
-extractData <- function(p,dots) {
+extractData <- function(p,data,d_spec) {
 
-  if (is.null(dots$dt)) {
+  d_spec <- d_spec[data_hash==p$data_hash]$data_spec[[1]]
 
-    data <- copy(p$data[[1]])
+  data <- merge(
+    x=d_spec,
+    y=data,
+    by=names(d_spec)
+  )
 
-  } else {
-
-    data <- merge(
-      x=p[,.SD,.SDcols=dots$key],
-      y=dots$dt,
-      by=dots$key
-    )
-
-  }
+  data <- data[,.SD,.SDcols=-names(d_spec)]
 
   return(data)
 
 }
 
 # extract model specification---------------------------------------------------
-extractModel <- function(p) {
+extractModel <- function(p,m_spec) {
 
-  p$m_spec[[1]]
+  m_spec <- m_spec[m_hash==p$m_hash]$m_spec[[1]]
 
-}
-
-# forecast model switch---------------------------------------------------------
-forecastModels <- function(m,data,m_spec,train_start,test_start,test_end) {
-
-  switch(
-    EXPR=m,
-    'prophet'=prophetForecast(
-      data=data,
-      m_spec=m_spec,
-      train_start=train_start,
-      test_start=test_start,
-      test_end=test_end
-    ),
-    'ma'=rollingMean(
-      data=data,
-      m_spec=m_spec,
-      train_start=train_start,
-      test_start=test_start,
-      test_end=test_end
-    )
-  )
+  return(m_spec)
 
 }
 
 # execute forecast iteration----------------------------------------------------
-executeForecast <- function(p,dots) {
+executeForecast <- function(data,p,d_spec,m_spec,
+                            incl_fit=getOption('incl_fit',default=FALSE)) {
 
   # extract data and model specification----------------------------------------
-  data <- extractData(p=p,dots=dots)
-  m_spec <- extractModel(p=p)
+  data <- extractData(
+    p=p,
+    data=data,
+    d_spec=d_spec
+  )
+
+  m_spec <- extractModel(
+    p=p,
+    m_spec=m_spec
+  )
 
   # forecast model switch-------------------------------------------------------
   l <- forecastModels(
@@ -84,8 +51,13 @@ executeForecast <- function(p,dots) {
   )
 
   # assign model fit and predictions--------------------------------------------
+  if (incl_fit) {
+
+    p$m_fit <- list(l$m_fit)
+
+  }
+
   p[,`:=` (
-    m_fit=.(l$m_fit),
     m_pred=.(l$m_pred)
   )]
 
@@ -93,67 +65,47 @@ executeForecast <- function(p,dots) {
 
 }
 
-# execute sequential forecast---------------------------------------------------
-sequentialForecast <- function(gdb,dt,key,incl_data) {
-
-  dots <- dataInclusion(dt,key,incl_data)
-
-  fdb <- lapply(seq_len(nrow(gdb)),function(j) {
-
-    # subset parameters---------------------------------------------------------
-    p <- gdb[j]
-
-    # execute forecast iteration------------------------------------------------
-    p <- executeForecast(p=p,dots=dots)
-
-    return(p)
-
-  }) %>% rbindlist(fill=TRUE)
-
-  return(fdb)
-
-}
-
-# create cluster and initialize node environments-------------------------------
-setupCluster <- function(gdb,dt,key,incl_data,src_dir,
-                         n=detectCores(),timeout=86400*30) {
-
-  dots <- dataInclusion(dt,key,incl_data)
+# execute parallel forecast-----------------------------------------------------
+parallelForecast <- function(dt,f_spec,d_spec,m_spec,src_dir,src_pattern,
+                             incl_fit=getOption('incl_fit',default=FALSE),
+                             n=detectCores(),timeout=86400*30,chunk.size=NULL) {
 
   clust <- makeCluster(n,timeout=timeout)
 
-  clusterExport(clust,c('src_dir','gdb','dots'),environment())
+  clusterExport(clust,c('dt','f_spec','d_spec','m_spec','src_dir','src_pattern','incl_fit'),environment())
 
   clusterEvalQ(clust,{
 
     library(data.table)
     library(magrittr)
     library(prophet)
+    library(purrr)
     library(zoo)
 
-    lapply(list.files(src_dir,'[0-9].[0-9].[1-9]',full.names=TRUE),source)
+    lapply(list.files(src_dir,src_pattern,full.names=TRUE),source)
+
+    options(incl_fit=incl_fit)
 
   })
 
-  return(clust)
-
-}
-
-# execute parallel forecast-----------------------------------------------------
-parallelForecast <- function(clust,gdb,chunk.size=NULL) {
-
-  fdb <- parLapplyLB(clust,seq_len(nrow(gdb)),function(j) {
-
-    # subset parameters---------------------------------------------------------
-    p <- gdb[j]
+  fdb <- parLapplyLB(clust,seq_len(nrow(f_spec)),function(j) {
 
     # execute forecast iteration------------------------------------------------
-    p <- executeForecast(p=p,dots=dots)
+    p <- executeForecast(
+      data=dt,
+      p=f_spec[j],
+      d_spec=d_spec,
+      m_spec=m_spec,
+      incl_fit=getOption('incl_fit',default=FALSE)
+      )
 
     return(p)
 
   },chunk.size=chunk.size) %>%
     rbindlist(fill=TRUE)
+
+  # kill cluster----------------------------------------------------------------
+  stopCluster(clust)
 
   return(fdb)
 
